@@ -1,108 +1,59 @@
-# Описание алгоритма:
-# Получаем кадры с обеих камер
-# 1) Изначально, если айди объекта сменился на новый, увеличиваем счетчик кадров, проверяем наличие массива array_id,
-# 	если под прошлым айди был найден уже существующий объект,
-# 		то увеличиваем количество одинаковых объектов
-# 		очищаем элемент массива векторов относящийся к этому объекту
-# Если объектов во втором кадре нет, то так же провермяем array_id со второй камеры, чтобы увеличить счетчик одинаковых элементов
-#
-# Далее проверка нового объекта
-# Если счетчик кадров больше 40, считаем вектор текущего элемента как 0.9 старого значения и 0.1 нового и заносим в массив векторов под текущим id
-# 	Параллельно считаем сходство данного вектора с уже имеющимися векторами, перебирая массив векторов.
-# 		Если значение параметра схожести векторов больше нужной величины, то в массиве array_id инкрементируем элемент под найденным id
-# Иначе ищем максимальный элемент массива array_id,
-# 	если он больше хотя бы 1/6 количества кадров определения айди, то записываем в correct_id номер элемента
-# 	иначе отдаем ему id идущий по порядку
-#
-# 2) Аналогично для второй камеры
-#
-# ***Трекер работает по принципу подсчета расстояния между центрами поступающих ему боксов
-# ***Перед входом в циклы, есть замер времени и поиск центра бокса, это нужно для трекера,
-# если сеть на несколько кадров теряет человека, то если время и расстояние между центрами последнего бокса и нового меньше определенной величины, то отдаем ему тот же айди.
+"""
+    Это документационная строка для main.py.
+
+    Описание алгоритма.
+Получаем кадры с обеих камер
+1) Изначально, если айди объекта сменился на новый, увеличиваем счетчик кадров, проверяем наличие массива array_id,
+	если под прошлым айди был найден уже существующий объект,
+		то увеличиваем количество одинаковых объектов
+		очищаем элемент массива векторов относящийся к этому объекту
+Если объектов во втором кадре нет, то так же проверяем array_id со второй камеры, чтобы увеличить счетчик одинаковых элементов
+
+Далее проверка нового объекта
+Если счетчик кадров больше 40, считаем вектор текущего элемента как 0.9 старого значения и 0.1 нового и заносим в массив векторов под текущим id
+	Параллельно считаем сходство данного вектора с уже имеющимися векторами, перебирая массив векторов.
+		Если значение параметра схожести векторов больше нужной величины, то в массиве array_id инкрементируем элемент под найденным id
+Иначе ищем максимальный элемент массива array_id,
+	если он больше хотя бы 1/6 количества кадров определения айди, то записываем в correct_id номер элемента
+	иначе отдаем ему id идущий по порядку
+
+2) Аналогично для второй камеры
+
+***Трекер работает по принципу подсчета расстояния между центрами поступающих ему боксов
+***Перед входом в циклы, есть замер времени и поиск центра бокса, это нужно для трекера,
+если сеть на несколько кадров теряет человека, то если время и расстояние между центрами последнего бокса и нового меньше определенной величины, то отдаем ему тот же айди
+
+    Пример использования:
+    python main.py 3.Camera 4.Camera GeneralNMHuman_v1.0_IR10_FP16 original_reid
+    """
+
+
 import argparse
 import cmath
 from datetime import datetime
 
 import cv2
 import numpy as np
-from openvino.inference_engine import IECore
 
-from tracker import *
-from utils import *
+from network import NeuralNetworkDetector
+from small_utils import (
+    calculate_area,
+    center_point_save,
+    clean_array,
+    get_screen_resolution,
+    if_border,
+    resize_frame,
+)
+from tracker import EuclideanDistTracker
 
+parser = argparse.ArgumentParser(description="Input video file")
+parser.add_argument("video_path1", type=str, help="Path to the video file number 1")
+parser.add_argument("video_path2", type=str, help="Path to the video file number 2")
+parser.add_argument("openvino_path", type=str, help="Path to the openvino model")
+parser.add_argument("onnx_path", type=str, help="Path to the onnx model")
+args = parser.parse_args()
 
-# класс инициализации нейронной сети
-# Input:
-# model_format - формат модели сети может быть onnx либо openvino, model_path - имя нейронной сети без расширения,
-# size - размер входного изображения для сети, device - устройство, по умолчанию GPU
-# метод forward
-# Input:
-# frame - изображение на вход сети
-# Output:
-# результат работы сети
-class NeuralNetworkDetector:
-    def __init__(self, model_format, model_path, size, device="GPU"):
-        self.ie = IECore()
-        if model_format == "openvino":
-            self.net = self.ie.read_network(
-                model=model_path + ".xml", weights=model_path + ".bin"
-            )
-        elif model_format == "onnx":
-            self.net = self.ie.read_network(model=model_path + ".onnx")
-
-        self.exec_net = self.ie.load_network(network=self.net, device_name=device)
-        self.input_size = size
-
-    def forward(self, frame):
-        resized_frame = cv2.resize(
-            frame, self.input_size, interpolation=cv2.INTER_AREA
-        )  ## изменение изображения до размера входа сети
-        input_frame = resized_frame.transpose(2, 0, 1)  # изменение RGB -> BGR
-        input_name = next(
-            iter(self.exec_net.input_info)
-        )  # функция синхронного исполнения нейронной сети (блокирует пользовательское приложение на время выполнения запроса на вывод)
-        output = self.exec_net.infer(
-            {input_name: input_frame}
-        )  # инференс нейронной сети
-        outs_net = next(iter(output.values()))  # выходные данные нейронной сети
-        return outs_net
-
-
-# метод на случай, если найден тот же объект
-# если максимальное число совпадений больше, чем хотя бы 1/6 от количества кадров проверки,
-# то очищаем текущий элемент с собранным вектором для этого объекта, так как он уже есть
-# + увеличиваем количество совпадающих объектов
-# Input:
-# arr_id - массив с совпадающими айди, count_same - подсчет одинаковых элементов, id_save - айди предыдущего объекта
-# Output:
-# количество одинаковых элементов
-def if_same_object(arr_id, count_same, id_save):
-    # если был найден существующий объект, то очистка собранного вектора и массива id + увеличение числа совпадающих объектов
-    if max(arr_id) >= count_frame // 6:
-        vector[id_save - count_same] = 0
-        count_same += 1
-    clean_array(arr_id)
-    return count_same
-
-
-# метод для определения корректного айди для объекта
-# если максимальное число совпадений больше, чем хотя бы 1/6 от количества кадров проверки,
-# то отдаем объекту найденный айди,
-# иначе айди по порядку
-# Input:
-# arr_id - массив с совпадающими айди, count_same - подсчет одинаковых элементов, global_id - айди текущего объекта
-# Output:
-# корректный айди объекта
-def find_max_same_id(arr_id, count_same, global_id):
-    arr_id_list = arr_id.tolist()
-    # если максимальное совпадение больше чем 1/6 от общего числа кадров проверки
-    if max(arr_id_list) >= count_frame // 6:
-        # то берем найденный id
-        corr_id = arr_id_list.index(max(arr_id_list))
-    else:
-        # иначе следующий по порядку
-        corr_id = global_id - count_same
-    return corr_id
+EPSILON = 1e-6
 
 
 # метод детекции людей с помощью нейросети
@@ -111,7 +62,8 @@ def find_max_same_id(arr_id, count_same, global_id):
 # Output:
 # координаты найденных боксов;
 def net_find_box(frame, detections, size):
-    outs_net = detector_openvino.forward(frame)  # результат работы нейронной сети
+    input_frame = detector_openvino.data_preparation(frame)
+    outs_net = detector_openvino.forward(input_frame)  # результат работы нейронной сети
     outs_net = outs_net[0][0]
     for out in outs_net:
         coord_array = []
@@ -156,12 +108,50 @@ def net_find_box(frame, detections, size):
 # вектор
 def net_search_vector(frame, global_id):
     alpha = 0.9
-    outs_vector = detector_onnx.forward(frame)
+    input_frame = detector_onnx.data_preparation(frame)
+    outs_vector = detector_onnx.forward(input_frame)
     if np.all(np.abs(vector[global_id]) < EPSILON):
         vector[global_id] = outs_vector
     else:
         vector[global_id] = alpha * vector[global_id] + (1 - alpha) * outs_vector
     return
+
+
+# метод на случай, если найден тот же объект
+# если максимальное число совпадений больше, чем хотя бы 1/6 от количества кадров проверки,
+# то очищаем текущий элемент с собранным вектором для этого объекта, так как он уже есть
+# + увеличиваем количество совпадающих объектов
+# Input:
+# arr_id - массив с совпадающими айди, count_same - подсчет одинаковых элементов, id_save - айди предыдущего объекта
+# Output:
+# количество одинаковых элементов
+def if_same_object(arr_id, count_same, id_save):
+    # если был найден существующий объект, то очистка собранного вектора и массива id + увеличение числа совпадающих объектов
+    if max(arr_id) >= count_frame // 6:
+        vector[id_save - count_same] = 0
+        count_same += 1
+    clean_array(arr_id)
+    return count_same
+
+
+# метод для определения корректного айди для объекта
+# если максимальное число совпадений больше, чем хотя бы 1/6 от количества кадров проверки,
+# то отдаем объекту найденный айди,
+# иначе айди по порядку
+# Input:
+# arr_id - массив с совпадающими айди, count_same - подсчет одинаковых элементов, global_id - айди текущего объекта
+# Output:
+# корректный айди объекта
+def find_max_same_id(arr_id, count_same, global_id):
+    arr_id_list = arr_id.tolist()
+    # если максимальное совпадение больше чем 1/6 от общего числа кадров проверки
+    if max(arr_id_list) >= count_frame // 6:
+        # то берем найденный id
+        corr_id = arr_id_list.index(max(arr_id_list))
+    else:
+        # иначе следующий по порядку
+        corr_id = global_id - count_same
+    return corr_id
 
 
 # метод поиска схожести векторов с помощью нейросети
@@ -201,50 +191,57 @@ def net_count_compare(global_id, opt_param, arr_id):
     return
 
 
-def if_new_object(id, num, num2):
+# метод для увеличения count_same - если новый объект, а старый был уже существующим
+# Input:
+# id текущего объекта по порядку, num_cam, num_cam2 - наименьший параметр схожести,
+# Output:
+# заполненный массив arr_id
+def if_new_object(id, num_cam, num_cam2):
     global count_same
     # если новый объект
-    if id != id_save[num]:
+    if id != id_save[num_cam]:
         # проверяем содержимое массива id для первой камеры и увеличиваем кол-во одинаковых объектов
-        count_same = if_same_object(array_id[num], count_same, id_save[num])
+        count_same = if_same_object(array_id[num_cam], count_same, id_save[num_cam])
         # если нет объекта во второй камере
-        if report[num2]:
+        if report[num_cam2]:
             # проверяем содержимое массива id для второй камеры и увеличиваем кол-во одинаковых объектов
-            count_same = if_same_object(array_id[num2], count_same, id_save[num2])
+            count_same = if_same_object(
+                array_id[num_cam2], count_same, id_save[num_cam2]
+            )
         # обновляем счетчик кадров для гистограмм и для детектора
-        count_frame_cam[num] = count_frame
+        count_frame_cam[num_cam] = count_frame
 
 
 # метод для определения нового объекта на полученном кадре
 # Input:
-# boxes_ids - координаты бокса и id нового объекта, num - номер камеры, frame - сам кадр
+# boxes_ids - координаты бокса и id нового объекта, num_cam - номер камеры, frame - сам кадр
 # Output:
 # верно определенный id объекта и бокс на кадре
-def camera_tracking(boxes_ids, num, frame):
+def camera_tracking(boxes_ids, num_cam, frame):
     global count_same, correct_id
-    num2 = (num + 1) % 2
+    num_cam2 = (num_cam + 1) % 2
     for box_id in boxes_ids:
         x, y, w, h, id = box_id
         # если надпись окажется за пределами
         y1 = if_border(y, h)
-        report[num] = False
+        report[num_cam] = False
         frame_plt1 = frame[y + 10 : h, x:w]
         # если новый объект, проверяем наличие массивов id (второй массив, только если отсутствует объект во 2 кадре)
-        if_new_object(id, num, num2)
+        if_new_object(id, num_cam, num_cam2)
         global_id1 = id - count_same
-        id_save[num] = id
+        id_save[num_cam] = id
         # пока счетчик кадров больше нуля, считаем сходства новой гистограммы с уже имеющимися
-        if count_frame_cam[num] > 0:
+        if count_frame_cam[num_cam] > 0:
             # ищем вектор схожести
             net_search_vector(frame_plt1, global_id1)
             # считаем сходства с существующими id
-            net_count_compare(global_id1, opt_param[num], array_id[num])
-            count_frame_cam[num] -= 1
-            correct_id[num] = global_id1
+            net_count_compare(global_id1, opt_param[num_cam], array_id[num_cam])
+            count_frame_cam[num_cam] -= 1
+            correct_id[num_cam] = global_id1
         else:
             # иначе ищем id с макс совпадением
-            correct_id[num] = find_max_same_id(array_id[num], count_same, id)
-            id = correct_id[num]
+            correct_id[num_cam] = find_max_same_id(array_id[num_cam], count_same, id)
+            id = correct_id[num_cam]
             cv2.putText(
                 frame,
                 "Object " + str(id),
@@ -254,38 +251,31 @@ def camera_tracking(boxes_ids, num, frame):
                 (0, 0, 255),
                 2,
             )
-        center[num] = center_point_save(x, w, y, h)
+        center[num_cam] = center_point_save(x, w, y, h)
         cv2.rectangle(frame, (x, y), (w, h), (255, 0, 0), 3)
-        time[num][0] = datetime.now().timestamp()
-        tracker[num2].id_count = tracker[num].id_count
+        time[num_cam][0] = datetime.now().timestamp()
+        tracker[num_cam2].id_count = tracker[num_cam].id_count
     return
 
 
 # метод для обновления трекера и использование метода camera_tracking
 # Input:
-# frame - сам кадр, num - номер камеры, size - минимальный и максимальный размер бокса
+# frame - сам кадр, num_cam - номер камеры, size - минимальный и максимальный размер бокса
 # Output:
 # output метода camera_tracking
-def update_camera_tracking(frame, num, size):
+def update_camera_tracking(frame, num_cam, size):
     detections = []
     net_find_box(frame, detections, size)
-    time[num][1] = datetime.now().timestamp()
+    time[num_cam][1] = datetime.now().timestamp()
     # разница времени с последнего бокса в первом кадре с текущим моментом
-    delta_time = int(time[num][1]) - int(time[num][0])
-    report[num] = True
+    delta_time = int(time[num_cam][1]) - int(time[num_cam][0])
+    report[num_cam] = True
     # обновление трекера
-    boxes_ids1 = tracker[num].update(detections, center[num], delta_time)
+    boxes_ids1 = tracker[num_cam].update(detections, center[num_cam], delta_time)
     # трекинг, назначение id, отрисовка боксов
-    camera_tracking(boxes_ids1, num, frame)
+    camera_tracking(boxes_ids1, num_cam, frame)
     return
 
-
-parser = argparse.ArgumentParser(description="Input video file")
-parser.add_argument("video_path1", type=str, help="Path to the video file number 1")
-parser.add_argument("video_path2", type=str, help="Path to the video file number 2")
-parser.add_argument("openvino_path", type=str, help="Path to the openvino model")
-parser.add_argument("onnx_path", type=str, help="Path to the onnx model")
-args = parser.parse_args()
 
 # Путь к файлам модели и весам
 model_path_openvino = args.openvino_path
@@ -305,16 +295,12 @@ detector_onnx = NeuralNetworkDetector(
 size_out = 0.3  # минимальная уверенность сети
 
 tracker = [EuclideanDistTracker(), EuclideanDistTracker()]
-tracker2 = EuclideanDistTracker()
 
 video_path1 = args.video_path1 + ".avi"
 video_path2 = args.video_path2 + ".avi"
 cap1 = cv2.VideoCapture(video_path1)
 cap2 = cv2.VideoCapture(video_path2)
-
-EPSILON = 1e-6
 width, height = get_screen_resolution()
-N = width * height
 
 id_save = [-1, -1]
 count_frame = 40  # количество кадров для идентификации человека
@@ -326,49 +312,47 @@ ret2, frame2_2 = cap2.read()
 height_frame, width_frame, _ = frame2_2.shape
 
 # минимальные и максимальные размеры боксов
-size1 = (
+size_box1 = (
     int(round(0.045 * width_frame * height_frame)),
     int(round(width_frame * height_frame / 3)),
 )
-size2 = (
+size_box2 = (
     int(round(0.0076 * width_frame * height_frame)),
     int(round(width_frame * height_frame / 3)),
 )
 
-array_id = np.zeros((2, 10))
-arr_id1, arr_id2 = (
-    [0] * 10,
-    [0] * 10,
-)  # массив для накопления совпадений с конкретным объектом
+array_id = np.zeros((2, 10))  # массив для накопления совпадений с конкретным объектом
+
 vector = np.zeros((200, vector_size))
 opt_param = [0.65, 0.48]  # границы сравнения векторов для каждого кадра
 count_same = 0  # переменная для подсчета одинаковых объектов
 
-report2 = True
-output_frames = []
 report = [True, True]
 center = np.zeros((2, 2))
 correct_id = [0, 0]
 time = np.zeros((2, 2))
 
-while True:
-    ret1, frame1 = cap1.read()
-    ret2, frame2 = cap2.read()
 
-    # трекинг кадра с первой камеры
-    update_camera_tracking(frame1, 0, size1)
+def main():
+    while True:
+        ret1, frame1 = cap1.read()
+        ret2, frame2 = cap2.read()
 
-    # трекинг кадра со второй камеры
-    update_camera_tracking(frame2, 1, size2)
+        # трекинг кадра с первой камеры
+        update_camera_tracking(frame1, 0, size_box1)
 
-    resized_frame_1 = cv2.resize(frame1, (width // 2, height // 2))
-    resized_frame_2 = cv2.resize(frame2, (width // 2, height // 2))
-    combined_frame = cv2.hconcat([resized_frame_1, resized_frame_2])
-    output_frames.append(combined_frame)
-    cv2.imshow("combined", combined_frame)
-    key = cv2.waitKey(30)
-    if key == 27:
-        break
-cap1.release()
-cap2.release()
-cv2.destroyAllWindows()
+        # трекинг кадра со второй камеры
+        update_camera_tracking(frame2, 1, size_box2)
+
+        combined_frame = resize_frame(frame1, frame2, width, height)
+        cv2.imshow("combined", combined_frame)
+        key = cv2.waitKey(30)
+        if key == 27:
+            break
+    cap1.release()
+    cap2.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

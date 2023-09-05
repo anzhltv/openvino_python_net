@@ -1,4 +1,5 @@
 import pyautogui
+import cv2
 
 # метод подсчета площади бокса
 # Input
@@ -38,3 +39,14 @@ def center_point_save(x1, x2, y1, y2):
 def clean_array(arr_id):
     for i in range(len(arr_id)):
         arr_id[i] = 0
+
+# метод уменьшения изображений и слияния в один кадр
+# Input:
+# кадры с камер и размер экрана
+# Output:
+# объединенный кадр
+def resize_frame(frame1, frame2, width, height):
+    resized_frame_1 = cv2.resize(frame1, (width // 2, height // 2))
+    resized_frame_2 = cv2.resize(frame2, (width // 2, height // 2))
+    combined_frame = cv2.hconcat([resized_frame_1, resized_frame_2])
+    return combined_frame
